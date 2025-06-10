@@ -1,0 +1,274 @@
+#include "StateMachineLib.h"
+#include "AsyncTaskLib.h"
+#include "Keypad.h"
+#include "LiquidCrystal.h"
+#include "DHT.h"
+
+void Inicio();
+void Monitoreo();
+
+AsyncTask inicio(0,true,Inicio);
+AsyncTask monitoreo(200,Monitoreo);
+
+
+#define LED_ROJO 46
+#define LED_VERDE 48
+#define LED_AZUL 50
+#define DHTPIN 22 
+#define DHTTYPE DHT11 
+const int rs = 12, en = 11, d4 = 5, d5 = 4, d6 = 3, d7 = 2;
+LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
+
+int sensorPin = A0;   
+int sensorValue = 0; 
+float h = 0;
+float t = 0;
+
+
+// Keypad setup
+const byte ROWS = 4;
+const byte COLS = 4;
+char keys[ROWS][COLS] = {
+  {'1','2','3', 'A'},
+  {'4','5','6', 'B'},
+  {'7','8','9', 'C'},
+  {'*','0','#', 'D'}
+};
+byte rowPins[ROWS] = {30, 32, 34, 36};
+byte colPins[COLS] = {38, 40, 42, 44};
+Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
+
+// Password
+char contrasenia[9] = "1234ABCD";
+char ingreso[9];
+int i = 0;
+int intentos = 0;
+DHT dht(DHTPIN, DHTTYPE);
+int bandera = 0;
+int flag=1;
+
+// State Alias
+enum State
+{
+  
+  MonitoreoAmbiental = 0,
+  Alarma = 1,
+  Init = 2,
+  ComfortTermicoAlto = 3,
+  ComfortTermicoBajo = 4,
+  Bloqueado = 5,
+};
+
+// Input Alias
+enum Input
+{
+  TIMEOUT = 0,
+  LUZ = 1,
+  TEMP = 2,
+  PMVA = 3,
+  PMVB = 4,
+  SISTEMABLOQUEADO=5,
+  INTENTOSALARMA= 6,
+  TECLA = 7, 
+  CLAVECORRECTA = 8,
+  Unknown=9,
+};
+
+// Create new StateMachine
+StateMachine stateMachine(6, 13);
+
+// Stores last user input
+Input input;
+Input inputT=Input::Unknown;
+
+// Setup the State Machine
+void setupStateMachine()
+{
+  // Add transitions
+  stateMachine.AddTransition(Init, MonitoreoAmbiental, []() { return input == CLAVECORRECTA; });
+  stateMachine.AddTransition(Init, Bloqueado, []() { return input == SISTEMABLOQUEADO; });
+
+  stateMachine.AddTransition(MonitoreoAmbiental, Alarma, []() { return input == TEMP; });
+  stateMachine.AddTransition(MonitoreoAmbiental, Alarma, []() { return input == LUZ; });
+
+  stateMachine.AddTransition(MonitoreoAmbiental, ComfortTermicoAlto, []() { return input == PMVA; });
+  stateMachine.AddTransition(MonitoreoAmbiental, ComfortTermicoBajo, []() { return input == PMVB; });
+  
+  stateMachine.AddTransition(ComfortTermicoAlto, MonitoreoAmbiental, []() { return input == TIMEOUT; });
+  stateMachine.AddTransition(ComfortTermicoBajo, MonitoreoAmbiental, []() { return input == TIMEOUT; });
+
+  stateMachine.AddTransition(Alarma, Bloqueado, []() { return input == INTENTOSALARMA; });
+  stateMachine.AddTransition(Alarma, MonitoreoAmbiental, []() { return input == TIMEOUT; });
+
+  stateMachine.AddTransition(Bloqueado, Init, []() { return input == TECLA; });
+
+  // Add actions
+  stateMachine.SetOnEntering(Init, I);
+  stateMachine.SetOnEntering(MonitoreoAmbiental, M);
+  stateMachine.SetOnEntering(Alarma, AlarmaP);
+  stateMachine.SetOnEntering(Bloqueado, Bloqueo);
+  stateMachine.SetOnEntering(ComfortTermicoAlto, ComfortTermicoAltoP);
+  stateMachine.SetOnEntering(ComfortTermicoBajo, ComfortTermicoBajoP);
+
+
+  stateMachine.SetOnLeaving(Init, Inicio);
+  stateMachine.SetOnLeaving(MonitoreoAmbiental,Monitoreo);
+  stateMachine.SetOnLeaving(Alarma,AlarmaP);
+  stateMachine.SetOnLeaving(Bloqueado,Bloqueo);
+  stateMachine.SetOnLeaving(ComfortTermicoAlto,ComfortTermicoAltoP);
+  stateMachine.SetOnLeaving(ComfortTermicoBajo,ComfortTermicoBajoP);
+}
+
+void setup() 
+{
+  lcd.begin(16, 2);
+  Serial.begin(9600);
+
+
+  Serial.println("Starting State Machine...");
+  setupStateMachine();  
+  Serial.println("Start Machine Started");
+
+  // Initial state
+  stateMachine.SetState(Init, false, true);
+  dht.begin();
+}
+
+void loop() 
+{
+  
+  input = inputT;  // <- aquí capturamos la nueva entrada si fue asignada
+  inputT = Input::Unknown; // limpiamos para la siguiente vuelta
+
+  // Update State Machine
+  stateMachine.Update();
+  inicio.Update();
+  monitoreo.Update();
+   //input = Input::Unknown;
+}
+
+// Auxiliar function that reads the user input
+int readInput()
+{
+  Input currentInput = Input::Unknown;
+  if (Serial.available())
+  {
+    char incomingChar = Serial.read();
+
+    switch (incomingChar)
+    {
+      case 'T': currentInput = Input::TIMEOUT;  break;
+      case 'L': currentInput = Input::LUZ; break;
+      case 'N': currentInput = Input::TEMP; break;
+      case 'A': currentInput = Input::PMVA; break;
+      case 'B': currentInput = Input::PMVB; break;
+      case 'S': currentInput = Input::SISTEMABLOQUEADO; break;
+      case 'I': currentInput = Input::INTENTOSALARMA; break;
+      case '*': currentInput = Input::TECLA; break;
+      case 'C': currentInput = Input::CLAVECORRECTA; break;
+      default: break;
+    }
+  }
+
+  return currentInput;
+}
+
+void Inicio()
+{
+  static bool primeraVez = true;
+
+  if (primeraVez) {
+    lcd.clear();
+    lcd.print("Digite su contra");
+    pinMode (LED_VERDE, OUTPUT);
+    pinMode (LED_AZUL, OUTPUT);
+    pinMode (LED_ROJO, OUTPUT);
+    digitalWrite(LED_VERDE, LOW);
+    digitalWrite(LED_AZUL, LOW);
+    digitalWrite(LED_ROJO, LOW);
+    primeraVez = false;
+  }
+
+  char key = keypad.getKey();
+  if (key && i < 8) {
+    ingreso[i] = key;
+    lcd.setCursor(i, 1);
+    lcd.print('*');
+    i++;
+  }
+
+  if (i == 8) {
+    ingreso[8] = '\0'; // aseguramos el fin de cadena
+    if (strcmp(contrasenia, ingreso) == 0) {
+      lcd.clear();
+      lcd.print("Clave Correcta");
+      digitalWrite(LED_VERDE, HIGH);
+      digitalWrite(LED_AZUL, LOW);
+      digitalWrite(LED_ROJO, LOW);
+      inputT = Input::CLAVECORRECTA;
+    } else {
+      lcd.clear();
+      lcd.print("Clave Incorrecta");
+      digitalWrite(LED_VERDE, LOW);
+      digitalWrite(LED_AZUL, HIGH);
+      digitalWrite(LED_ROJO, LOW);
+      intentos++;
+      delay(2000);
+      lcd.clear();
+      lcd.print("Digite su contra");
+    }
+
+    i = 0;
+    memset(ingreso, 0, sizeof(ingreso));
+  }
+
+  if (intentos >= 3) {
+    lcd.clear();
+    lcd.print("Sistema bloqueado");
+    digitalWrite(LED_VERDE, LOW);
+    digitalWrite(LED_AZUL, LOW);
+    digitalWrite(LED_ROJO, HIGH);
+    inputT = Input::SISTEMABLOQUEADO;
+  }
+}
+// Auxiliar output functions that show the state debug
+void Monitoreo()
+{
+  lcd.print("Xd");
+  Serial.println("entrando a monitoreo");
+
+}
+
+void AlarmaP()
+{
+  Serial.println(" wiu wiu wiu wiu wiu ");
+
+}
+
+void Bloqueo()
+{
+  Serial.println(" Sistema bloqueado ");
+
+}
+void ComfortTermicoAltoP()
+{
+  Serial.println(" Comfort Termico Alto enfriando motores ");
+}
+void ComfortTermicoBajoP()
+{
+  Serial.println(" Comfort Termico Bajo calentando motores ");
+}
+
+
+void M()
+{
+
+  monitoreo.Start();
+
+}
+void I()
+{
+
+  inicio.Start();
+
+}
